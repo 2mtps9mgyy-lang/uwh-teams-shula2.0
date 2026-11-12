@@ -82,8 +82,9 @@ button.row{width:100%;background:none;border:0;border-bottom:1px solid var(--lin
 .team .rate{font-size:17px;min-width:22px}
 .team .pos{min-width:26px;font-size:13px;padding:1px 3px}
 .bar{display:flex;height:10px;border-radius:5px;overflow:hidden;border:1px solid var(--line)}
-.bar span:first-child{background:#101418}
-.bar span:last-child{background:#f6fafa}
+.bar .seg-noirs{background:#101418}
+.bar .seg-blancs{background:#f6fafa}
+.bar .seg-bleus{background:#1c6fb5}
 .score{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .stepper{display:flex;flex-direction:column;align-items:center;gap:6px}
 .stepper .ctl{display:flex;align-items:center;gap:12px}
@@ -111,6 +112,13 @@ fieldset{border:0;padding:0;margin:0;display:flex;flex-direction:column;gap:8px}
 .toast{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:8px;font-weight:600;font-size:14px;max-width:calc(100% - 32px);text-align:center}
 .result{font-family:var(--display);font-weight:700;font-size:20px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .linkish{background:none;border:0;padding:6px 0;color:var(--muted);text-decoration:underline;font-size:14px;align-self:flex-start}
+.team.bleus .team-head{background:#1c6fb5;color:#fff}
+.link-tag{flex:none;width:34px;height:34px;border-radius:50%;border:1px dashed var(--muted);background:none;color:var(--muted);font-family:var(--display);font-weight:700;font-size:17px;padding:0;line-height:1}
+.link-tag.on{border:1px solid var(--accent);background:var(--accent);color:var(--on-accent)}
+.pillbtn{padding:8px 14px;border:1px solid var(--line);border-radius:999px;font-weight:500;background:var(--surface)}
+.pillbtn.on{background:var(--water);border-color:var(--water);color:var(--surface)}
+.pillbtn[disabled]{opacity:.5;cursor:not-allowed}
+.copybox{width:100%;font:12px ui-monospace,Menlo,monospace;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--surface);color:var(--ink)}
 </style>
 </head>
 <body>
@@ -130,19 +138,23 @@ function avg(team){return team.length?team.reduce((s,p)=>s+p.rating,0)/team.leng
 function can(p,pos){return p.main===pos||p.alt.includes(pos);}
 
 // Cost of a split: average gap + position imbalance + uncovered positions.
-function splitCost(A,B,need,parity){
-  let c=Math.abs(avg(A)-avg(B));
+function splitCost(T,need,parity){
+  let lo=1e9,hi=-1e9;
+  for(const t of T){const a=avg(t);if(a<lo)lo=a;if(a>hi)hi=a;}
+  let c=hi-lo;
   for(const pos of POS){
-    let a=0,b=0,ca=0,cb=0;
-    for(const p of A){if(p.main===pos)a++;if(can(p,pos))ca++;}
-    for(const p of B){if(p.main===pos)b++;if(can(p,pos))cb++;}
-    c+=2.5*Math.max(0,Math.abs(a-b)-parity[pos]);
-    c+=6*(Math.max(0,need[pos]-ca)+Math.max(0,need[pos]-cb));
-    c+=1.5*(Math.max(0,need[pos]-a)+Math.max(0,need[pos]-b));
+    let mn=1e9,mx=-1e9;
+    for(const t of T){
+      let a=0,ca=0;
+      for(const p of t){if(p.main===pos)a++;if(can(p,pos))ca++;}
+      if(a<mn)mn=a;if(a>mx)mx=a;
+      c+=6*Math.max(0,need[pos]-ca)+1.5*Math.max(0,need[pos]-a);
+    }
+    c+=2.5*Math.max(0,mx-mn-parity[pos]);
   }
   return c;
 }
-function signature(A,B){const s=t=>t.map(p=>p.id).sort((x,y)=>x-y).join(',');return [s(A),s(B)].sort().join('|');}
+function signature(T){return T.map(t=>t.map(p=>p.id).sort((x,y)=>x-y).join(',')).sort().join('|');}
 
 // Everyone starts at their main position; a short position is filled by a player
 // from an overstaffed position who has it as a secondary.
@@ -167,35 +179,50 @@ function assignPositions(team,need){
   return pos;
 }
 
-// Search: random starts + player swaps while the cost drops.
+// Links between players: same letter = same team; A and B in different teams; C and D too.
+const TAG_PAIRS=[['A','B'],['C','D']];
+
+// Search: random starts + player swaps while the cost drops. Works for 2 or 3 teams.
+// Linked players are placed first and never swapped, so links always hold.
 // `avoid` holds splits already shown, to get a different one.
-function makeTeams(players,rnd,avoid){
-  rnd=rnd||Math.random;avoid=avoid||[];
-  const n=players.length,sizeA=Math.ceil(n/2);
-  const need=needFor(Math.floor(n/2));
+function makeTeams(players,rnd,avoid,opts){
+  rnd=rnd||Math.random;avoid=avoid||[];opts=opts||{};
+  const K=opts.K||2,tags=opts.tags||{},n=players.length;
+  const sizes=Array.from({length:K},(_,i)=>Math.floor(n/K)+(i<n%K?1:0));
+  const need=needFor(Math.floor(n/K));
   const parity={};
-  for(const pos of POS)parity[pos]=players.filter(p=>p.main===pos).length%2;
+  for(const pos of POS)parity[pos]=players.filter(p=>p.main===pos).length%K?1:0;
   const found=new Map();
   for(let r=0;r<80;r++){
-    const o=shuffle(players,rnd),A=o.slice(0,sizeA),B=o.slice(sizeA);
-    let cost=splitCost(A,B,need,parity),improved=true;
+    const T=Array.from({length:K},()=>[]),lock=T.map(()=>0),placed=new Set();
+    for(const pair of TAG_PAIRS){
+      const order=shuffle(T.map((_,i)=>i),rnd);
+      pair.forEach((L,i)=>{for(const p of players)if(tags[p.id]===L){T[order[i]].push(p);lock[order[i]]++;placed.add(p);}});
+    }
+    for(const p of shuffle(players.filter(p=>!placed.has(p)),rnd)){
+      let b=0;
+      for(let t=1;t<K;t++)if(sizes[t]-T[t].length>sizes[b]-T[b].length)b=t;
+      T[b].push(p);
+    }
+    let cost=splitCost(T,need,parity),improved=true;
     while(improved){
       improved=false;
-      for(let i=0;i<A.length;i++)for(let j=0;j<B.length;j++){
-        const t=A[i];A[i]=B[j];B[j]=t;
-        const c=splitCost(A,B,need,parity);
-        if(c<cost-1e-9){cost=c;improved=true;}else{B[j]=A[i];A[i]=t;}
-      }
+      for(let a=0;a<K;a++)for(let b=a+1;b<K;b++)
+        for(let i=lock[a];i<T[a].length;i++)for(let j=lock[b];j<T[b].length;j++){
+          const x=T[a][i];T[a][i]=T[b][j];T[b][j]=x;
+          const c=splitCost(T,need,parity);
+          if(c<cost-1e-9){cost=c;improved=true;}else{T[b][j]=T[a][i];T[a][i]=x;}
+        }
     }
-    const sig=signature(A,B);
-    if(!found.has(sig))found.set(sig,{sig,cost,A,B});
+    const sig=signature(T);
+    if(!found.has(sig))found.set(sig,{sig,cost,T});
   }
   const list=[...found.values()].sort((x,y)=>x.cost-y.cost);
   const best=list[0];
   const pick=list.find(x=>!avoid.includes(x.sig)&&x.cost<=best.cost+1.5)||list.find(x=>!avoid.includes(x.sig))||best;
-  return {A:pick.A,B:pick.B,sig:pick.sig,cost:pick.cost,format:need.F===2?6:5,
-    avgA:avg(pick.A),avgB:avg(pick.B),
-    assign:Object.assign({},assignPositions(pick.A,need),assignPositions(pick.B,need))};
+  const assign={};
+  for(const t of pick.T)Object.assign(assign,assignPositions(t,need));
+  return {T:pick.T,sig:pick.sig,cost:pick.cost,format:need.F===2?6:5,assign};
 }
 
 // Recurring results: over a player's last 6 matches (4 minimum), compare results
@@ -203,6 +230,7 @@ function makeTeams(players,rnd,avoid){
 function suggestAdjustments(players,matches){
   const out=[];
   for(const p of players){
+    if(p.guest)continue;
     const rel=[];
     matches.forEach((m,i)=>{
       if(i<(p.adjFrom||0))return;
@@ -230,23 +258,6 @@ function seedPlayers(){
   const raw=[["Zoé", 61, "F", ["W"], 0], ["Sam", 61, "F", [], 0], ["Chiche Diaz", 66, "W", ["F", "B"], 0], ["Adrian", 75, "W", ["F", "B"], 0], ["Marta", 46, "W", ["F"], 0], ["Jorge", 89, "C", ["F", "W"], 1], ["Ale", 53, "F", ["W"], 0], ["Marina", 61, "B", ["W"], 0], ["Chuches", 90, "C", ["F", "W", "B"], 1], ["Fer", 77, "B", ["F", "W"], 0], ["Moisés", 69, "B", ["W"], 0], ["María", 46, "F", ["W"], 0], ["Merxe", 55, "W", ["F", "B"], 0], ["Jelle Gorter", 45, "F", ["W"], 0], ["Clara Martínez", 64, "C", ["F", "W"], 0], ["Alberto", 69, "B", ["F", "W", "C"], 0]];
   return raw.map((r,i)=>({id:i+2,name:r[0],rating:r[1],main:r[2],alt:r[3],admin:!!r[4],pin:'1234',adjFrom:0}));
 }
-function seedMatches(players,dates){
-  const rnd=rng32(2026),star=players.find(p=>p.name==='Sam'),low=players.find(p=>p.name==='Alberto'),out=[];
-  for(let k=0;k<dates.length;k++){
-    const pick=shuffle(players.filter(p=>p!==star&&p!==low),rnd).slice(0,10).concat([star,low]);
-    const t=makeTeams(pick,rnd),A=t.A,B=t.B;
-    if(A.includes(star)===A.includes(low)){
-      const from=A.includes(star)?A:B,to=from===A?B:A;
-      let sw=to[0];
-      for(const p of to)if(Math.abs(p.rating-low.rating)<Math.abs(sw.rating-low.rating))sw=p;
-      from[from.indexOf(low)]=sw;to[to.indexOf(sw)]=low;
-    }
-    const aWins=A.includes(star)===(k!==2);
-    const hi=3+Math.floor(rnd()*3),lo=Math.floor(rnd()*3);
-    out.push({date:dates[k],A:A.map(p=>p.id),B:B.map(p=>p.id),avgA:avg(A),avgB:avg(B),scoreA:aWins?hi:lo,scoreB:aWins?lo:hi});
-  }
-  return out;
-}
 </script>
 
 <script id="app-code">
@@ -264,28 +275,42 @@ function nextSession(now){
 function freshState(){
   const players=seedPlayers(),nt=nextSession(new Date());
   return {v:2,players,nextId:players.length+2,sessionDate:nt.toISOString(),
-    registered:[],teams:null,seen:[],
-    matches:[],mig:2,me:null,tab:'seance',sheet:null,scoreForm:null,loginErr:'',toast:''};
+    registered:[],tags:{},nTeams:2,teams:null,seen:[],
+    matches:[],mig:3,me:null,tab:'seance',sheet:null,scoreForm:null,loginErr:'',toast:''};
 }
 function save(){try{localStorage.setItem(KEY,JSON.stringify(state));}catch(e){}}
 const RATINGS={"Chuches": 90, "Jorge": 89, "Fer": 77, "Adrian": 75, "Moisés": 69, "Alberto": 69, "Chiche Diaz": 66, "Clara Martínez": 64, "Sam": 61, "Marina": 61, "Zoé": 61, "Merxe": 55, "Ale": 53, "Marta": 46, "María": 46, "Jelle Gorter": 45};
 // Move to real ratings without touching positions already entered in this browser.
 function migrate(s){
-  if(s.mig===1){for(const p of s.players){if(p.name==='Jorge')p.rating=89;if(p.name==='Zoé')p.rating=61;}s.teams=null;s.seen=[];s.mig=2;return s;}
-  if(s.mig)return s;
-  const ch=s.players.find(p=>p.name==='Chuches'),hy=s.players.find(p=>p.name==='Hyacinthe');
-  if(hy&&ch){
-    s.players=s.players.filter(p=>p!==hy);s.registered=s.registered.filter(x=>x!==hy.id);
-    if(s.me===hy.id)s.me=ch.id;
+  if(!s.mig){
+    const ch=s.players.find(p=>p.name==='Chuches'),hy=s.players.find(p=>p.name==='Hyacinthe');
+    if(hy&&ch){
+      s.players=s.players.filter(p=>p!==hy);s.registered=s.registered.filter(x=>x!==hy.id);
+      if(s.me===hy.id)s.me=ch.id;
+    }
+    if(ch)ch.admin=true;
+    for(const p of s.players){if(RATINGS[p.name]!=null)p.rating=RATINGS[p.name];p.adjFrom=0;}
+    s.matches=[];s.sheet=null;s.mig=2;
+  }else if(s.mig===1){
+    for(const p of s.players){if(p.name==='Jorge')p.rating=89;if(p.name==='Zoé')p.rating=61;}
+    s.mig=2;
   }
-  if(ch)ch.admin=true;
-  for(const p of s.players){if(RATINGS[p.name]!=null)p.rating=RATINGS[p.name];p.adjFrom=0;}
-  s.matches=[];s.teams=null;s.seen=[];s.scoreForm=null;s.sheet=null;s.mig=2;
+  // v3: links, guests, 3 teams. Teams are stored as a list of teams.
+  if(s.mig===2){s.tags={};s.nTeams=2;s.teams=null;s.seen=[];s.scoreForm=null;s.mig=3;}
+  return s;
+}
+// 18 h after a session starts, open the next one: empty sign-up list, links cleared, guests dropped.
+function rollover(s){
+  if(Date.now()>new Date(s.sessionDate).getTime()+18*3600e3){
+    s.sessionDate=nextSession(new Date()).toISOString();
+    s.players=s.players.filter(p=>!p.guest);
+    s.registered=[];s.tags={};s.teams=null;s.seen=[];s.scoreForm=null;
+  }
   return s;
 }
 function load(hot){
-  if(hot&&hot.v===2)return migrate(hot);
-  try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&s.v===2)return migrate(s);}catch(e){}
+  if(hot&&hot.v===2)return rollover(migrate(hot));
+  try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&s.v===2)return rollover(migrate(s));}catch(e){}
   return freshState();
 }
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -296,45 +321,54 @@ const fr1=n=>n.toFixed(1);
 const fmtDate=iso=>new Date(iso).toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long'});
 const fmtShort=iso=>new Date(iso).toLocaleDateString('en-GB',{day:'numeric',month:'short'});
 function toast(msg){state.toast=msg;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{state.toast='';render();},2600);}
-function formatInfo(n){
-  const per=Math.floor(n/2);
+const TEAMS=[{cls:'noirs',name:'Black'},{cls:'blancs',name:'White'},{cls:'bleus',name:'Blue'}];
+const nTeams=()=>state.nTeams===3&&state.registered.length>=18?3:2;
+function formatInfo(n,K){
+  K=K||2;
+  const per=Math.floor(n/K);
   if(n<10)return {ok:false,text:'At least 10 players are needed to make two teams of 5.'};
   const f=per>=6?6:5,subs=per-f;
-  return {ok:true,text:f+' v '+f+(subs>0?' · '+subs+' sub'+(subs>1?'s':'')+' per team':'')+(n%2?' · Black has one extra player':'')};
+  return {ok:true,text:(K===3?'3 teams · ':'')+f+' v '+f+(subs>0?' · '+subs+' sub'+(subs>1?'s':'')+' per team':'')+(n%K?' · team sizes differ by one':'')};
 }
 
-function posChips(p){
+function posChips(p,mainOnly){
   return '<span class="pos" title="'+POS_LABEL[p.main]+'">'+POS_CODE[p.main]+'</span>'+
-    p.alt.map(a=>'<span class="pos alt" title="'+POS_LABEL[a]+' (secondary)">'+POS_CODE[a]+'</span>').join('');
+    (mainOnly?[]:p.alt).map(a=>'<span class="pos alt" title="'+POS_LABEL[a]+' (secondary)">'+POS_CODE[a]+'</span>').join('');
 }
 
 function viewLogin(){
   return '<main><div><h1>Who are you?</h1><p class="muted">Pick your name and enter your code.</p></div>'+
   '<div class="card">'+
     '<div class="field"><label for="login-name">Your name</label><select id="login-name">'+
-      state.players.slice().sort((a,b)=>a.name.localeCompare(b.name,'en')).map(p=>'<option value="'+p.id+'">'+esc(p.name)+'</option>').join('')+'</select></div>'+
+      state.players.filter(p=>!p.guest).sort((a,b)=>a.name.localeCompare(b.name,'en')).map(p=>'<option value="'+p.id+'">'+esc(p.name)+'</option>').join('')+'</select></div>'+
     '<div class="field"><label for="login-pin">Your 4-digit code</label><input type="text" id="login-pin" inputmode="numeric" maxlength="4" autocomplete="off"></div>'+
     '<p class="err" role="alert">'+esc(state.loginErr)+'</p>'+
     '<button class="btn primary" data-act="login">Sign in</button>'+
   '</div>'+
   '<div class="card"><h3>Try the prototype</h3><p class="muted">Every code is 1234.</p>'+
     '<div class="btns"><button class="btn" data-act="demo" data-id="'+(state.players.find(p=>p.admin)||{}).id+'">View as admin</button>'+
-    '<button class="btn" data-act="demo" data-id="'+(state.players.find(p=>!p.admin)||{}).id+'">View as player</button></div>'+
+    '<button class="btn" data-act="demo" data-id="'+(state.players.find(p=>!p.admin&&!p.guest)||{}).id+'">View as player</button></div>'+
     '<button class="linkish" data-act="reset">Reset to sample data</button></div></main>';
 }
 
 function viewSeance(){
   const admin=isAdmin(),reg=state.registered.map(byId).filter(Boolean),inIt=state.registered.includes(state.me);
-  const info=formatInfo(reg.length);
+  const info=formatInfo(reg.length,nTeams());
   const sorted=reg.slice().sort((a,b)=>admin?b.rating-a.rating:a.name.localeCompare(b.name,'en'));
   let h='<div class="card"><h3>Next session</h3><h1>'+esc(fmtDate(state.sessionDate))+'</h1><p class="muted">9:30 PM</p>'+
     '<div class="kpis"><div><span class="big">'+reg.length+'</span><span class="muted">signed up</span></div><p class="muted" style="flex:1;min-width:150px">'+esc(info.text)+'</p></div>'+
     '<button class="btn '+(inIt?'':'primary')+'" data-act="toggle-me">'+(inIt?'I\'m out':'I\'m in')+'</button></div>';
-  h+='<div class="card"><h3>Signed up</h3><ul class="list">'+(sorted.length?sorted.map(p=>
-    '<li class="row">'+posChips(p)+'<span class="name">'+esc(p.name)+(p.id===state.me?' <span class="tag">me</span>':'')+'</span>'+
-    (admin?'<span class="rate">'+p.rating+'</span><button class="btn small" data-act="unreg" data-id="'+p.id+'" aria-label="Remove '+esc(p.name)+'">Remove</button>':'')+'</li>').join(''):'<li class="row muted">Nobody yet.</li>')+'</ul></div>';
+  h+='<div class="card"><h3>Signed up</h3><ul class="list">'+(sorted.length?sorted.map(p=>{
+    const tg=state.tags[p.id]||'';
+    return '<li class="row">'+
+      (admin?'<button class="link-tag'+(tg?' on':'')+'" data-act="tag" data-id="'+p.id+'" aria-label="Link for '+esc(p.name)+': '+(tg||'none')+'">'+(tg||'·')+'</button>':'')+
+      posChips(p,true)+'<span class="name">'+esc(p.name)+(p.id===state.me?' <span class="tag">me</span>':'')+(p.guest?' <span class="tag">guest</span>':'')+'</span>'+
+      (admin?'<span class="rate">'+p.rating+'</span><button class="btn small" data-act="unreg" data-id="'+p.id+'" aria-label="Remove '+esc(p.name)+'">Remove</button>':'')+'</li>';
+  }).join(''):'<li class="row muted">Nobody yet.</li>')+'</ul>'+
+  (admin?'<p class="muted">Tap the circle left of a name to link players. Same letter: same team. A and B: never together. C and D: never together. Empty circle: no constraint.</p>'+
+    '<button class="btn" data-act="edit" data-id="guest">Add a guest</button>':'')+'</div>';
   if(admin){
-    const out=state.players.filter(p=>!state.registered.includes(p.id)).sort((a,b)=>a.name.localeCompare(b.name,'en'));
+    const out=state.players.filter(p=>!p.guest&&!state.registered.includes(p.id)).sort((a,b)=>a.name.localeCompare(b.name,'en'));
     h+='<div class="card"><h3>Not signed up yet</h3><ul class="list">'+out.map(p=>
       '<li class="row">'+posChips(p)+'<span class="name">'+esc(p.name)+'</span><span class="rate">'+p.rating+'</span>'+
       '<button class="btn small" data-act="reg" data-id="'+p.id+'" aria-label="Add '+esc(p.name)+'">Add</button></li>').join('')+'</ul></div>';
@@ -346,7 +380,7 @@ function teamCard(cls,label,ids,t,admin){
   const ps=ids.map(byId).filter(Boolean);
   let rows='';
   for(const pos of POS){
-    ps.filter(p=>(t.assign[p.id]||p.main)===pos).sort((a,b)=>b.rating-a.rating).forEach(p=>{
+    ps.filter(p=>(t.assign[p.id]||p.main)===pos).sort((a,b)=>admin?b.rating-a.rating:a.name.localeCompare(b.name,'en')).forEach(p=>{
       const second=(t.assign[p.id]||p.main)!==p.main;
       rows+='<li class="row"><span class="pos'+(second?' alt':'')+'" title="'+POS_LABEL[pos]+(second?' (secondary position)':'')+'">'+POS_CODE[pos]+'</span>'+
         '<span class="name">'+esc(p.name)+'</span>'+(admin?'<span class="rate">'+p.rating+'</span>':'')+'</li>';
@@ -354,26 +388,45 @@ function teamCard(cls,label,ids,t,admin){
   }
   return '<div class="team '+cls+'"><div class="team-head"><span>'+label+'</span>'+(admin?'<small>avg '+fr1(avg(ps))+'</small>':'')+'</div><ul class="list">'+rows+'</ul></div>';
 }
+function shareText(){
+  const t=state.teams,info=formatInfo(state.registered.length,t.T.length);
+  let txt='*UWH Madrid · '+fmtDate(state.sessionDate)+'*\n'+info.text+'\n';
+  t.T.forEach((ids,i)=>{
+    const ps=ids.map(byId).filter(Boolean);
+    txt+='\n*'+TEAMS[i].name.toUpperCase()+'* ('+ps.length+')\n';
+    for(const pos of POS){
+      const names=ps.filter(p=>(t.assign[p.id]||p.main)===pos).map(p=>p.name).sort((a,b)=>a.localeCompare(b,'en'));
+      if(names.length)txt+=POS_CODE[pos]+': '+names.join(', ')+'\n';
+    }
+  });
+  return txt.trim();
+}
 function viewEquipes(){
-  const admin=isAdmin(),t=state.teams,n=state.registered.length,info=formatInfo(n);
+  const admin=isAdmin(),t=state.teams,n=state.registered.length,K=t?t.T.length:nTeams(),info=formatInfo(n,K);
   if(!t){
     if(!admin)return '<main><div class="card"><h2>Teams</h2><p class="muted">Teams are not published yet. They will show up here once an admin generates them.</p></div></main>';
+    const can3=n>=18;
     return '<main><div class="card"><h2>Teams</h2><p>'+n+' signed up. '+esc(info.text)+'</p>'+
-      '<p class="muted">The app looks for the split where both averages are closest, with the same number of forwards, wings, centers and fullbacks on each side.</p>'+
+      '<fieldset><legend>Number of teams</legend><div class="pills">'+[2,3].map(k=>
+        '<button class="pillbtn'+(K===k?' on':'')+'" data-act="nteams" data-k="'+k+'" aria-pressed="'+(K===k)+'"'+(k===3&&!can3?' disabled':'')+'>'+k+' teams</button>').join('')+'</div>'+
+      (can3?'':'<p class="muted">3 teams are available from 18 players.</p>')+'</fieldset>'+
+      '<p class="muted">The app looks for the split where team averages are closest, with the same number of forwards, wings, centers and fullbacks in each team. Links set in the Session tab always hold.</p>'+
       '<button class="btn primary" data-act="gen"'+(info.ok?'':' disabled')+'>Generate teams</button></div></main>';
   }
-  const A=t.A.map(byId).filter(Boolean),B=t.B.map(byId).filter(Boolean);
+  const T=t.T.map(ids=>ids.map(byId).filter(Boolean));
   let h='';
   if(admin){
-    const sa=A.reduce((s,p)=>s+p.rating,0),sb=B.reduce((s,p)=>s+p.rating,0);
-    h+='<div class="card"><div class="kpis"><div><span class="big">'+fr1(Math.abs(avg(A)-avg(B)))+'</span><span class="muted">point gap between averages</span></div>'+
+    const av=T.map(avg);
+    h+='<div class="card"><div class="kpis"><div><span class="big">'+fr1(Math.max.apply(null,av)-Math.min.apply(null,av))+'</span><span class="muted">point gap between averages</span></div>'+
       '<p class="muted" style="flex:1;min-width:150px">'+esc(info.text)+'</p></div>'+
-      '<div class="bar" role="img" aria-label="Black and White team strength"><span style="flex:'+sa+'"></span><span style="flex:'+sb+'"></span></div></div>';
+      '<div class="bar" role="img" aria-label="Relative strength of the teams">'+T.map((ps,i)=>'<span class="seg-'+TEAMS[i].cls+'" style="flex:'+ps.reduce((x,p)=>x+p.rating,0)+'"></span>').join('')+'</div></div>';
   }else{
     h+='<div><h2>Teams for '+esc(fmtDate(state.sessionDate))+'</h2><p class="muted">'+esc(info.text)+'</p></div>';
   }
-  h+='<div class="teams">'+teamCard('noirs','Black',t.A,t,admin)+teamCard('blancs','White',t.B,t,admin)+'</div>';
+  h+='<div class="teams">'+t.T.map((ids,i)=>teamCard(TEAMS[i].cls,TEAMS[i].name,ids,t,admin)).join('')+'</div>';
   h+='<p class="muted">FW forward · WG wing · CE center · FB fullback. An outlined tag is a secondary position.</p>';
+  h+='<button class="btn" data-act="share">Copy teams for WhatsApp</button>'+
+    (state.shareText?'<p class="muted">If nothing was copied, select this text and copy it.</p><textarea id="share-text" class="copybox" readonly rows="8">'+esc(state.shareText)+'</textarea>':'');
   if(admin){
     if(state.scoreForm){
       const f=state.scoreForm;
@@ -381,7 +434,10 @@ function viewEquipes(){
         '<button class="btn" data-act="score" data-k="'+k+'" data-d="-1" aria-label="Remove a goal from '+label+'">−</button>'+
         '<span class="big">'+f[k]+'</span>'+
         '<button class="btn" data-act="score" data-k="'+k+'" data-d="1" aria-label="Add a goal to '+label+'">+</button></div></div>';
-      h+='<div class="card"><h3>Match result</h3><div class="score">'+step('a','Black')+step('b','White')+'</div>'+
+      h+='<div class="card"><h3>Match result</h3>'+
+        (K===3?'<div class="pills">'+[[0,1],[0,2],[1,2]].map(pr=>
+          '<button class="pillbtn'+(f.i===pr[0]&&f.j===pr[1]?' on':'')+'" data-act="pairing" data-i="'+pr[0]+'" data-j="'+pr[1]+'" aria-pressed="'+(f.i===pr[0]&&f.j===pr[1])+'">'+TEAMS[pr[0]].name+' v '+TEAMS[pr[1]].name+'</button>').join('')+'</div>':'')+
+        '<div class="score">'+step('a',TEAMS[f.i].name)+step('b',TEAMS[f.j].name)+'</div>'+
         '<div class="btns"><button class="btn primary" data-act="save-score">Save result</button><button class="btn" data-act="cancel-score">Cancel</button></div></div>';
     }else{
       h+='<div class="btns"><button class="btn" data-act="gen">Another split</button><button class="btn primary" data-act="open-score">Enter result</button></div>';
@@ -391,33 +447,34 @@ function viewEquipes(){
 }
 
 function viewJoueurs(){
-  const ps=state.players.slice().sort((a,b)=>b.rating-a.rating);
+  const ps=state.players.filter(p=>!p.guest).sort((a,b)=>b.rating-a.rating);
   return '<main><div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><h2>'+ps.length+' members</h2>'+
     '<button class="btn small" data-act="edit" data-id="new">Add</button></div>'+
     '<div class="card"><ul class="list">'+ps.map(p=>
       '<li><button class="row" data-act="edit" data-id="'+p.id+'">'+posChips(p)+'<span class="name">'+esc(p.name)+(p.admin?' <span class="tag">admin</span>':'')+'</span><span class="rate">'+p.rating+'</span></button></li>').join('')+
     '</ul></div><p class="muted">Filled tag: main position. Outlined tag: secondary position. Tap a row to edit the profile.</p>'+
     '<div class="card"><h3>Export</h3><button class="btn" data-act="export">Copy club data</button>'+
-    (state.exportText?'<p class="muted">If nothing was copied, select this text and copy it.</p><textarea id="export-text" readonly rows="5" style="width:100%;font:12px monospace;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--surface);color:var(--ink)">'+esc(state.exportText)+'</textarea>':'')+'</div></main>';
+    (state.exportText?'<p class="muted">If nothing was copied, select this text and copy it.</p><textarea id="export-text" class="copybox" readonly rows="5">'+esc(state.exportText)+'</textarea>':'')+'</div></main>';
 }
 
 function viewSheet(){
-  const isNew=state.sheet==='new';
-  const p=isNew?{name:'',rating:60,main:'F',alt:[],admin:false,pin:'1234'}:byId(state.sheet);
+  const isNew=state.sheet==='new',isGuest=state.sheet==='guest';
+  const p=isNew||isGuest?{name:'',rating:60,main:'F',alt:[],admin:false,pin:'1234'}:byId(state.sheet);
   if(!p)return '';
   return '<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">'+
-    '<h2 id="sheet-title">'+(isNew?'New member':'Profile: '+esc(p.name))+'</h2>'+
+    '<h2 id="sheet-title">'+(isGuest?'Guest for this session':isNew?'New member':'Profile: '+esc(p.name))+'</h2>'+
+    (isGuest?'<p class="muted">A guest plays this session only and is not added to the club.</p>':'')+
     '<div class="field"><label for="f-name">Name</label><input type="text" id="f-name" value="'+esc(p.name)+'"></div>'+
-    '<div class="field"><label for="f-rating">Rating: <output id="f-rating-out" for="f-rating">'+p.rating+'</output> / 100</label><input type="range" id="f-rating" min="1" max="100" value="'+p.rating+'"></div>'+
+    '<div class="field"><label for="f-rating">'+(isGuest?'Estimated rating':'Rating')+': <output id="f-rating-out" for="f-rating">'+p.rating+'</output> / 100</label><input type="range" id="f-rating" min="1" max="100" value="'+p.rating+'"></div>'+
     '<fieldset><legend>Main position</legend><div class="pills">'+POS.map(k=>
       '<label class="pill"><input type="radio" name="f-main" id="f-main-'+k+'" value="'+k+'"'+(p.main===k?' checked':'')+'><span>'+POS_LABEL[k]+'</span></label>').join('')+'</div></fieldset>'+
     '<fieldset><legend>Can also play</legend><div class="pills">'+POS.map(k=>
       '<label class="pill"><input type="checkbox" name="f-alt" id="f-alt-'+k+'" value="'+k+'"'+(p.alt.includes(k)?' checked':'')+'><span>'+POS_LABEL[k]+'</span></label>').join('')+'</div></fieldset>'+
-    '<label class="check" for="f-admin"><input type="checkbox" id="f-admin"'+(p.admin?' checked':'')+'><span>Premium access: sees and edits ratings, positions and results</span></label>'+
-    '<div class="field"><label for="f-pin">4-digit code</label><input type="text" id="f-pin" inputmode="numeric" maxlength="4" value="'+esc(p.pin)+'"></div>'+
+    (isGuest?'':'<label class="check" for="f-admin"><input type="checkbox" id="f-admin"'+(p.admin?' checked':'')+'><span>Premium access: sees and edits ratings, positions and results</span></label>'+
+    '<div class="field"><label for="f-pin">4-digit code</label><input type="text" id="f-pin" inputmode="numeric" maxlength="4" value="'+esc(p.pin)+'"></div>')+
     '<p class="err" id="f-err" role="alert"></p>'+
-    '<div class="btns"><button class="btn primary" data-act="save-player">Save</button><button class="btn" data-act="close-sheet">Cancel</button></div>'+
-    (!isNew&&p.id!==state.me?'<button class="btn danger" data-act="del-player">Remove from club</button>':'')+'</div>';
+    '<div class="btns"><button class="btn primary" data-act="save-player">'+(isGuest?'Add guest':'Save')+'</button><button class="btn" data-act="close-sheet">Cancel</button></div>'+
+    (!isNew&&!isGuest&&p.id!==state.me?'<button class="btn danger" data-act="del-player">Remove from club</button>':'')+'</div>';
 }
 
 function viewResultats(){
@@ -435,7 +492,7 @@ function viewResultats(){
   h+='<p class="muted">The app suggests, an admin decides. A change is only suggested after at least 4 matches and a clear streak, 5 points at most each time.</p></div>';
   h+='<div class="card"><h3>Recorded matches</h3><ul class="list">'+state.matches.slice().reverse().map(m=>
     '<li class="row"><span class="name">'+esc(fmtShort(m.date))+' <span class="muted">· '+(m.A.length+m.B.length)+' players</span></span>'+
-    '<span class="result">Black '+m.scoreA+' – '+m.scoreB+' White</span></li>').join('')+(state.matches.length?'':'<li class="row muted">No match recorded.</li>')+'</ul></div>';
+    '<span class="result">'+(m.nameA||'Black')+' '+m.scoreA+' – '+m.scoreB+' '+(m.nameB||'White')+'</span></li>').join('')+(state.matches.length?'':'<li class="row muted">No match recorded.</li>')+'</ul></div>';
   return '<main>'+h+'</main>';
 }
 
@@ -454,69 +511,97 @@ function render(){
   root.innerHTML=h;
 }
 
-function regChanged(){if(state.teams){state.teams=null;state.seen=[];state.scoreForm=null;toast('Sign-ups changed: regenerate the teams.');}}
+function regChanged(){state.shareText='';if(state.teams){state.teams=null;state.seen=[];state.scoreForm=null;toast('Session changed: regenerate the teams.');}}
+function dropFromSession(id){
+  state.registered=state.registered.filter(x=>x!==id);
+  delete state.tags[id];
+  const p=byId(id);
+  if(p&&p.guest)state.players=state.players.filter(x=>x!==p);
+}
 
 const acts={
   login(){
     const id=+document.getElementById('login-name').value,pin=document.getElementById('login-pin').value.trim(),p=byId(id);
-    if(!p||p.pin!==pin){state.loginErr='Wrong code. In the prototype, the code is 1234.';return;}
+    if(!p||p.guest||p.pin!==pin){state.loginErr='Wrong code. In the prototype, the code is 1234.';return;}
     state.loginErr='';state.me=id;state.tab='seance';
   },
   demo(el){state.me=+el.dataset.id;state.loginErr='';state.tab='seance';},
   logout(){state.me=null;state.sheet=null;state.scoreForm=null;},
   reset(){state=freshState();},
-  tab(el){state.tab=el.dataset.tab;state.sheet=null;state.exportText='';},
+  tab(el){state.tab=el.dataset.tab;state.sheet=null;state.exportText='';state.shareText='';},
   'toggle-me'(){
-    const i=state.registered.indexOf(state.me);
-    if(i>=0)state.registered.splice(i,1);else state.registered.push(state.me);
+    if(state.registered.includes(state.me))dropFromSession(state.me);else state.registered.push(state.me);
     regChanged();
   },
   reg(el){if(!isAdmin())return;const id=+el.dataset.id;if(!state.registered.includes(id))state.registered.push(id);regChanged();},
-  unreg(el){if(!isAdmin())return;state.registered=state.registered.filter(x=>x!==+el.dataset.id);regChanged();},
+  unreg(el){if(!isAdmin())return;dropFromSession(+el.dataset.id);regChanged();},
+  tag(el){
+    if(!isAdmin())return;
+    const id=+el.dataset.id,order=['','A','B','C','D'],next=order[(order.indexOf(state.tags[id]||'')+1)%order.length];
+    if(next)state.tags[id]=next;else delete state.tags[id];
+    regChanged();
+  },
+  nteams(el){if(!isAdmin())return;state.nTeams=+el.dataset.k;},
   gen(){
     if(!isAdmin())return;
-    const ps=state.registered.map(byId).filter(Boolean);
-    if(ps.length<10)return;
-    const t=makeTeams(ps,Math.random,state.seen);
+    const ps=state.registered.map(byId).filter(Boolean),K=nTeams();
+    if(!formatInfo(ps.length,K).ok)return;
+    const t=makeTeams(ps,Math.random,state.seen,{K,tags:state.tags});
     if(state.seen.includes(t.sig)){state.seen=[];toast('All good splits have been shown, starting again from the best one.');}
     state.seen.push(t.sig);
-    state.teams={A:t.A.map(p=>p.id),B:t.B.map(p=>p.id),assign:t.assign,format:t.format};
-    state.scoreForm=null;
+    state.teams={T:t.T.map(x=>x.map(p=>p.id)),assign:t.assign,format:t.format};
+    state.scoreForm=null;state.shareText='';
+    const len=t.T.map(x=>x.length);
+    if(Math.max.apply(null,len)-Math.min.apply(null,len)>1)toast('A linked group is larger than a team, so team sizes are uneven.');
   },
-  'open-score'(){state.scoreForm={a:0,b:0};},
+  share(){
+    if(!state.teams)return;
+    const txt=shareText();
+    state.shareText=txt;
+    try{navigator.clipboard.writeText(txt).then(()=>{toast('Teams copied. Paste them in WhatsApp.');render();}).catch(()=>{});}catch(e){}
+  },
+  'open-score'(){state.scoreForm={a:0,b:0,i:0,j:1};},
   'cancel-score'(){state.scoreForm=null;},
+  pairing(el){const f=state.scoreForm;if(!f)return;f.i=+el.dataset.i;f.j=+el.dataset.j;},
   score(el){const f=state.scoreForm;if(!f)return;f[el.dataset.k]=Math.max(0,Math.min(30,f[el.dataset.k]+ +el.dataset.d));},
   'save-score'(){
-    if(!isAdmin()||!state.teams||!state.scoreForm)return;
-    const A=state.teams.A.map(byId).filter(Boolean),B=state.teams.B.map(byId).filter(Boolean);
-    state.matches.push({date:state.sessionDate,A:A.map(p=>p.id),B:B.map(p=>p.id),avgA:avg(A),avgB:avg(B),scoreA:state.scoreForm.a,scoreB:state.scoreForm.b});
-    state.teams=null;state.seen=[];state.scoreForm=null;state.tab='resultats';
-    toast('Result saved.');
+    const f=state.scoreForm;
+    if(!isAdmin()||!state.teams||!f)return;
+    const A=state.teams.T[f.i].map(byId).filter(Boolean),B=state.teams.T[f.j].map(byId).filter(Boolean);
+    state.matches.push({date:state.sessionDate,A:A.map(p=>p.id),B:B.map(p=>p.id),avgA:avg(A),avgB:avg(B),scoreA:f.a,scoreB:f.b,nameA:TEAMS[f.i].name,nameB:TEAMS[f.j].name});
+    state.scoreForm=null;
+    toast('Result saved. It is listed in Results.');
   },
   export(){
     if(!isAdmin())return;
-    const txt=JSON.stringify(state.players.map(p=>[p.name,p.rating,p.main,p.alt,p.admin?1:0]));
+    const txt=JSON.stringify(state.players.filter(p=>!p.guest).map(p=>[p.name,p.rating,p.main,p.alt,p.admin?1:0]));
     state.exportText=txt;
     try{navigator.clipboard.writeText(txt).then(()=>{toast('Club data copied.');render();}).catch(()=>{});}catch(e){}
   },
-  edit(el){if(!isAdmin())return;state.sheet=el.dataset.id==='new'?'new':+el.dataset.id;},
+  edit(el){if(!isAdmin())return;const id=el.dataset.id;state.sheet=id==='new'||id==='guest'?id:+id;},
   'close-sheet'(){state.sheet=null;},
   'save-player'(){
     if(!isAdmin())return 'stay';
-    const name=document.getElementById('f-name').value.trim(),pin=document.getElementById('f-pin').value.trim();
+    const guest=state.sheet==='guest';
+    const name=document.getElementById('f-name').value.trim(),pin=guest?'':document.getElementById('f-pin').value.trim();
     const err=document.getElementById('f-err');
     if(!name){err.textContent='Enter a name.';return 'stay';}
-    if(!/^\d{4}$/.test(pin)){err.textContent='The code must be 4 digits.';return 'stay';}
+    if(!guest&&!/^\d{4}$/.test(pin)){err.textContent='The code must be 4 digits.';return 'stay';}
     const main=(document.querySelector('input[name="f-main"]:checked')||{}).value||'F';
     const alt=[...document.querySelectorAll('input[name="f-alt"]:checked')].map(i=>i.value).filter(k=>k!==main);
-    const data={name,pin,rating:+document.getElementById('f-rating').value,main,alt,admin:document.getElementById('f-admin').checked};
-    if(state.sheet==='new')state.players.push(Object.assign({id:state.nextId++,adjFrom:state.matches.length},data));
+    const data={name,pin,rating:+document.getElementById('f-rating').value,main,alt,admin:guest?false:document.getElementById('f-admin').checked};
+    if(guest){
+      const id=state.nextId++;
+      state.players.push(Object.assign({id,guest:true,adjFrom:state.matches.length},data));
+      state.registered.push(id);
+      regChanged();
+    }else if(state.sheet==='new')state.players.push(Object.assign({id:state.nextId++,adjFrom:state.matches.length},data));
     else{
       const p=byId(state.sheet);
       if(p.id===state.me)data.admin=true;
       const changed=p.rating!==data.rating||p.main!==data.main||p.alt.join()!==data.alt.join();
       Object.assign(p,data);
-      if(changed&&state.teams&&state.registered.includes(p.id)){state.teams=null;state.seen=[];toast('Profile changed: regenerate the teams.');}
+      if(changed&&state.teams&&state.registered.includes(p.id)){state.teams=null;state.seen=[];state.shareText='';toast('Profile changed: regenerate the teams.');}
     }
     state.sheet=null;
   },
@@ -526,7 +611,7 @@ const acts={
     const id=state.sheet;
     state.players=state.players.filter(p=>p.id!==id);
     const was=state.registered.includes(id);
-    state.registered=state.registered.filter(x=>x!==id);
+    state.registered=state.registered.filter(x=>x!==id);delete state.tags[id];
     if(was)regChanged();
     state.sheet=null;
   },
