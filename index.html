@@ -490,9 +490,33 @@ function viewResultats(){
       '<button class="btn small" data-act="ignore" data-id="'+s.id+'">Dismiss</button></div></div>';
   }).join('')+'</div>';
   h+='<p class="muted">The app suggests, an admin decides. A change is only suggested after at least 4 matches and a clear streak, 5 points at most each time.</p></div>';
-  h+='<div class="card"><h3>Recorded matches</h3><ul class="list">'+state.matches.slice().reverse().map(m=>
-    '<li class="row"><span class="name">'+esc(fmtShort(m.date))+' <span class="muted">· '+(m.A.length+m.B.length)+' players</span></span>'+
-    '<span class="result">'+(m.nameA||'Black')+' '+m.scoreA+' – '+m.scoreB+' '+(m.nameB||'White')+'</span></li>').join('')+(state.matches.length?'':'<li class="row muted">No match recorded.</li>')+'</ul></div>';
+  const order=state.matches.map((m,i)=>i).sort((x,y)=>new Date(state.matches[y].date)-new Date(state.matches[x].date)||y-x);
+  h+='<div class="card"><h3>Recorded matches</h3><ul class="list">'+order.map(i=>{
+    const m=state.matches[i];
+    return '<li class="row"><span class="name">'+esc(fmtShort(m.date))+' <span class="muted">· '+(m.A.length+m.B.length)+' players</span></span>'+
+    '<span class="result">'+(m.nameA||'Black')+' '+m.scoreA+' – '+m.scoreB+' '+(m.nameB||'White')+'</span>'+
+    '<button class="btn small danger" data-act="del-match" data-i="'+i+'" aria-label="Delete the match of '+esc(fmtShort(m.date))+'">Delete</button></li>';
+  }).join('')+(state.matches.length?'':'<li class="row muted">No match recorded.</li>')+'</ul>'+
+  (state.manual?'':'<button class="btn" data-act="manual-open">Add a match played without the app</button>')+'</div>';
+  if(state.manual){
+    const f=state.manual,nA=Object.values(f.side).filter(x=>x==='A').length,nB=Object.values(f.side).filter(x=>x==='B').length;
+    const step=(k,label)=>'<div class="stepper"><span class="muted">'+label+'</span><div class="ctl">'+
+      '<button class="btn" data-act="mscore" data-k="'+k+'" data-d="-1" aria-label="Remove a goal from '+label+'">−</button>'+
+      '<span class="big">'+f[k]+'</span>'+
+      '<button class="btn" data-act="mscore" data-k="'+k+'" data-d="1" aria-label="Add a goal to '+label+'">+</button></div></div>';
+    h+='<div class="card" id="manual-card"><h3>Match played without the app</h3>'+
+      '<div class="field"><label for="m-date">Date</label><input type="date" id="m-date" value="'+esc(f.date)+'"></div>'+
+      '<p class="muted">Tap the team each player was in. Black '+nA+' · White '+nB+'</p><ul class="list">'+
+      state.players.filter(p=>!p.guest).sort((a,b)=>a.name.localeCompare(b.name,'en')).map(p=>{
+        const sd=f.side[p.id]||'';
+        return '<li class="row"><span class="name">'+esc(p.name)+'</span>'+
+          '<button class="pillbtn'+(sd==='A'?' on':'')+'" data-act="mside" data-id="'+p.id+'" data-side="A" aria-pressed="'+(sd==='A')+'" aria-label="'+esc(p.name)+' in Black">Black</button>'+
+          '<button class="pillbtn'+(sd==='B'?' on':'')+'" data-act="mside" data-id="'+p.id+'" data-side="B" aria-pressed="'+(sd==='B')+'" aria-label="'+esc(p.name)+' in White">White</button></li>';
+      }).join('')+'</ul>'+
+      '<div class="score">'+step('a','Black')+step('b','White')+'</div>'+
+      '<p class="err" role="alert">'+esc(f.err||'')+'</p>'+
+      '<div class="btns"><button class="btn primary" data-act="manual-save">Save match</button><button class="btn" data-act="manual-cancel">Cancel</button></div></div>';
+  }
   return '<main>'+h+'</main>';
 }
 
@@ -528,7 +552,7 @@ const acts={
   demo(el){state.me=+el.dataset.id;state.loginErr='';state.tab='seance';},
   logout(){state.me=null;state.sheet=null;state.scoreForm=null;},
   reset(){state=freshState();},
-  tab(el){state.tab=el.dataset.tab;state.sheet=null;state.exportText='';state.shareText='';},
+  tab(el){state.tab=el.dataset.tab;state.sheet=null;state.exportText='';state.shareText='';state.manual=null;},
   'toggle-me'(){
     if(state.registered.includes(state.me))dropFromSession(state.me);else state.registered.push(state.me);
     regChanged();
@@ -615,6 +639,34 @@ const acts={
     if(was)regChanged();
     state.sheet=null;
   },
+  'manual-open'(){
+    if(!isAdmin())return;
+    // default date: the most recent Tuesday or Thursday session already played
+    const now=new Date(),d=new Date(now);d.setHours(21,30,0,0);
+    for(let i=0;i<8;i++){const g=d.getDay();if((g===2||g===4)&&d<now)break;d.setDate(d.getDate()-1);}
+    const pad=n=>String(n).padStart(2,'0');
+    state.manual={date:d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()),side:{},a:0,b:0,err:''};
+  },
+  'manual-cancel'(){state.manual=null;},
+  mside(el){const f=state.manual;if(!f)return;const id=el.dataset.id;if(f.side[id]===el.dataset.side)delete f.side[id];else f.side[id]=el.dataset.side;f.err='';},
+  mscore(el){const f=state.manual;if(!f)return;f[el.dataset.k]=Math.max(0,Math.min(30,f[el.dataset.k]+ +el.dataset.d));},
+  'manual-save'(){
+    const f=state.manual;
+    if(!isAdmin()||!f)return;
+    const pick=sd=>state.players.filter(p=>f.side[p.id]===sd),A=pick('A'),B=pick('B'),when=new Date(f.date+'T21:30:00');
+    if(!f.date||isNaN(when)){f.err='Pick the date of the match.';return;}
+    if(!A.length||!B.length){f.err='Put at least one player in each team.';return;}
+    state.matches.push({date:when.toISOString(),A:A.map(p=>p.id),B:B.map(p=>p.id),avgA:avg(A),avgB:avg(B),scoreA:f.a,scoreB:f.b,nameA:'Black',nameB:'White',manual:true});
+    state.manual=null;
+    toast('Match saved.');
+  },
+  'del-match'(el){
+    if(!isAdmin())return 'stay';
+    if(!el.dataset.confirm){el.dataset.confirm='1';el.textContent='Confirm';return 'stay';}
+    const i=+el.dataset.i;
+    state.matches.splice(i,1);
+    for(const p of state.players)if((p.adjFrom||0)>i)p.adjFrom--;
+  },
   apply(el){if(!isAdmin())return;const p=byId(+el.dataset.id);p.rating=+el.dataset.to;p.adjFrom=state.matches.length;toast('Rating updated for '+p.name+'.');},
   ignore(el){if(!isAdmin())return;byId(+el.dataset.id).adjFrom=state.matches.length;}
 };
@@ -628,6 +680,7 @@ root.addEventListener('click',e=>{
 });
 root.addEventListener('input',e=>{
   if(e.target.id==='f-rating'){const o=document.getElementById('f-rating-out');if(o)o.textContent=e.target.value;}
+  if(e.target.id==='m-date'&&state.manual){state.manual.date=e.target.value;save();}
 });
 root.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&e.target.id==='login-pin'){acts.login();save();render();}
